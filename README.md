@@ -14,6 +14,7 @@
 
 ## 安装
 
+安装为软件包或直接复制代码包到项目目录下，安装方式：
 ```bash
 # 假设代码包在 Markdown_Spliter 目录下
 pip install -e /path/to/Markdown_Spliter
