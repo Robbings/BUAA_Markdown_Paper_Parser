@@ -1,219 +1,202 @@
-import re
-
-from Markdown_Spliter.config import keywords_config
+from typing import Optional
+from Markdown_Spliter.strategies import (
+    ParsingStrategy,
+    StrategyFactory,
+    ThesisParsingStrategy,
+    ConferencePaperStrategy,
+    JournalPaperStrategy
+)
 
 
 class MarkdownParser:
+    """
+    Main parser class for Markdown documents.
 
-    def __init__(self):
+    Uses a strategy pattern to support different document formats (thesis, conference papers, etc.).
+    The parser automatically detects the document format or allows manual specification.
+
+    Usage:
+        # Automatic format detection
+        parser = MarkdownParser.init_by_path("document.md")
+
+        # Manual format specification
+        parser = MarkdownParser.init_by_path("document.md", strategy="thesis")
+
+        # From string
+        parser = MarkdownParser.init_by_str(content)
+        parser._parse()
+    """
+
+    def __init__(self, strategy: Optional[ParsingStrategy] = None):
+        """
+        Initialize the parser.
+
+        Args:
+            strategy: Optional parsing strategy instance. If None, will be auto-detected later.
+        """
         self.metadata = {}
         self.content = None
         self.path = None
         self.lines = []
-        self.paser_tree = []
-        self.keywords_config = keywords_config
+        self.parse_tree = []
+        self.strategy = strategy
+        # For backward compatibility
+        self.keywords_config = strategy.keywords_config if strategy else []
 
     @classmethod
-    def init_by_path(cls, path):
+    def init_by_path(cls, path: str, strategy: Optional[str] = None, verbose: bool = False):
         """
         Initialize the parser with a file path.
-        :param path: Path to the markdown file.
-        :return: An instance of MarkdownParser.
+
+        Args:
+            path: Path to the markdown file
+            strategy: Optional strategy name ("thesis", "conference", etc.)
+                     If None, format will be auto-detected
+            verbose: If True, print format detection information
+
+        Returns:
+            An instance of MarkdownParser with content loaded and parsed
         """
         instance = cls()
         instance.path = path
         instance._load_md(path)
+
+        # Auto-detect or create strategy
+        instance.strategy = StrategyFactory.create_strategy(
+            strategy_name=strategy,
+            content=instance.content,
+            lines=instance.lines,
+            verbose=verbose
+        )
+        instance.keywords_config = instance.strategy.keywords_config
+
+        # Parse the document
         instance._parse()
         return instance
 
     @classmethod
-    def init_by_str(cls, content):
+    def init_by_str(cls, content: str, strategy: Optional[str] = None, verbose: bool = False):
         """
         Initialize the parser with a string.
-        :param content: Content of the markdown file.
-        :return: An instance of MarkdownParser.
+
+        Args:
+            content: Content of the markdown file
+            strategy: Optional strategy name ("thesis", "conference", etc.)
+                     If None, format will be auto-detected when _parse() is called
+            verbose: If True, print format detection information
+
+        Returns:
+            An instance of MarkdownParser (note: you must call _parse() manually)
         """
         instance = cls()
         instance.content = content
+
+        # Prepare lines for strategy detection
+        lines = content.split("\n")
+        instance.lines = [line for line in lines if line.strip() != ""]
+
+        # Auto-detect or create strategy
+        instance.strategy = StrategyFactory.create_strategy(
+            strategy_name=strategy,
+            content=instance.content,
+            lines=instance.lines,
+            verbose=verbose
+        )
+        instance.keywords_config = instance.strategy.keywords_config
+
         return instance
 
-    def _load_md(self, path):
+    def _load_md(self, path: str):
         """
         Load markdown content from a file.
-        :param path: Path to the markdown file.
-        :return: Content of the markdown file.
+
+        Args:
+            path: Path to the markdown file
         """
         with open(path, "r", encoding="utf-8") as f:
-            self.content =  f.read()
+            self.content = f.read()
+
         lines = self.content.split("\n")
-        # 移除空行
+        # Remove empty lines
         self.lines = [line for line in lines if line.strip() != ""]
 
     def get_metadata(self) -> dict:
         """
-        Parse metadata from the markdown content.
-        :return: A dictionary containing metadata.
+        Get metadata from the parsed document.
+
+        Returns:
+            A dictionary containing metadata
         """
         return self.metadata
 
     def get_parse_tree(self) -> list:
         """
         Get the parse tree of the markdown content.
-        :return: A list representing the parse tree.
+
+        Returns:
+            A list representing the parse tree
         """
         return self.parse_tree
-
-
-    def _match_keyword_level(self, text):
-        """
-        Match keywords in the text to determine their level and description.
-        :param text: Text to be matched.
-        :return:    A tuple containing the level and description of the matched keyword.
-        """
-        for config in self.keywords_config:
-            if re.search(config["keyword"], text):
-                return config["level"], config["description"]
-        return None, None
 
     def _parse(self):
         """
         Parse the markdown content to extract metadata and structure.
-        :return:
+
+        Delegates parsing to the selected strategy.
         """
-        stage = 0
-        current_metadata_lines = []
-        tree = []
-        node_stack = []
-        last_part = False
-        last_description = None
+        if self.strategy is None:
+            raise RuntimeError("No parsing strategy set. Use init_by_path() or init_by_str() to initialize.")
 
-        def add_node(level, description, title, line):
-            node = {
-                "level": level,
-                "description": description,
-                "title": title.strip("# ").strip(),
-                "line": line,
-                "content": "",
-                "children": []
-            }
+        # Delegate parsing to the strategy
+        metadata, parse_tree = self.strategy.parse(self.lines)
 
-            while node_stack and node_stack[-1]["level"] >= level:
-                node_stack.pop()
+        self.metadata = metadata
+        self.parse_tree = parse_tree
 
-            if node_stack and level > 0:
-                node_stack[-1]["children"].append(node)
-            else:
-                tree.append(node)
-            node_stack.append(node)
-
-        def add_content(line):
-            if node_stack:
-                node_stack[-1]["content"] += line.strip() + "\n"
-
-        i = 0
-        while i < len(self.lines):
-            line = self.lines[i].strip()
-
-            # Step 1: 等待出现 北京航空航天大學博士学位论文（中间可能有空格）
-            if stage == 0:
-                if line.startswith("#") and re.search(r"博\s*士\s*学\s*位\s*论\s*文", line, re.IGNORECASE):
-                    stage = 1
-
-            # Step 2: 捕捉论文题目
-            elif stage == 1:
-                self.metadata["title"] = line.strip("# ").strip()
-                self.metadata["raw"] = "# title: " + self.metadata["title"] + "\n\n"
-                stage = 2
-
-            elif stage == 2:
-                if line.startswith("#"):
-                    stage = 3  # metadata 结束
-                    self.metadata["raw"] += "\n"
-                    continue
-                self.metadata["raw"] += line + "\n"
-                i += 1
-                continue
-
-            # Step 3: 正文结构解析（只解析 # 开头的段落）
-            elif stage == 3:
-                if line.startswith("#"):
-                    if last_part:
-                        stage = 4
-                        continue
-                    level, description = self._match_keyword_level(line)
-                    if description == "references":
-                        last_part = True
-                    if level is not None:
-                        add_node(level, description, line, i)
-                    else:
-                        add_content(line)
-                else:
-                    if not re.search(r"^\s*参\s*考\s*文\s*献\s*$", line):
-                        add_content(line)
-                    else:
-                        last_part = True
-                        add_node(1, "references", line, i)
-            # 处理最后的部分，作为metadata
-            elif stage == 4:
-                if line.startswith("#"):
-                    level, last_description = self._match_keyword_level(line)
-                    if level is None:
-                        last_description = "raw"
-                        if last_description not in self.metadata:
-                            self.metadata[last_description] = ""
-                        self.metadata[last_description] += "\n" + line.strip() + "\n"
-                else:
-                    if last_description not in self.metadata:
-                        self.metadata[last_description] = ""
-                    self.metadata[last_description] += line.strip() + "\n"
-            i += 1
-
-        self.parse_tree = tree
-
-    def get_section_content(self, **kwargs):
+    def get_section_content(self, **kwargs) -> str:
         """
-        获取指定章节及其子内容，并转换为Markdown格式字符串返回
+        Get specific sections and their content, returned as a Markdown string.
 
-        可用的查询参数:
-        :param level: 标题级别，例如 1 表示章，2 表示节，等
-        :param description: 描述，例如 'chapter', 'section', 'abstract_ch' 等
-        :param title: 标题内容，将进行部分匹配
-        :param exact_title: 标题内容，将进行精确匹配
+        Available query parameters:
+            level: Heading level (1 = chapter, 2 = section, etc.)
+            description: Description type ('chapter', 'section', 'abstract_ch', etc.)
+            title: Title content (partial match)
+            exact_title: Title content (exact match)
 
-        :return: 包含指定章节及其子内容的Markdown格式字符串
+        Returns:
+            Markdown-formatted string containing the matched sections and their content
         """
-        if not hasattr(self, 'parse_tree'):
-            self._parse()
-
-        # 如果parse_tree为空，返回空字符串
-        if not self.parse_tree:
+        if not hasattr(self, 'parse_tree') or not self.parse_tree:
             return ""
 
-        # 查找符合条件的节点
+        # Find matching nodes
         found_nodes = self._find_nodes(self.parse_tree, **kwargs)
 
         if not found_nodes:
             return ""
 
-        # 将节点转换为Markdown格式
+        # Convert nodes to Markdown format
         result = ""
         for node in found_nodes:
             result += self._node_to_markdown(node)
 
         return result
 
-    def _find_nodes(self, nodes, **kwargs):
+    def _find_nodes(self, nodes: list, **kwargs) -> list:
         """
-        递归查找符合条件的节点
+        Recursively find nodes matching the given criteria.
 
-        :param nodes: 要搜索的节点列表
-        :param kwargs: 查询参数
-        :return: 符合条件的节点列表
+        Args:
+            nodes: List of nodes to search
+            kwargs: Query parameters
+
+        Returns:
+            List of matching nodes
         """
         found = []
 
         for node in nodes:
-            # 检查节点是否符合所有指定的条件
+            # Check if node matches all specified criteria
             match = True
 
             for key, value in kwargs.items():
@@ -233,33 +216,53 @@ class MarkdownParser:
             if match:
                 found.append(node)
 
-            # 递归搜索子节点
+            # Recursively search child nodes
             if 'children' in node and node['children']:
                 child_found = self._find_nodes(node['children'], **kwargs)
                 found.extend(child_found)
 
         return found
 
-    def _node_to_markdown(self, node, depth=0):
+    def _node_to_markdown(self, node: dict, depth: int = 0) -> str:
         """
-        将节点转换为Markdown格式
+        Convert a node to Markdown format.
 
-        :param node: 要转换的节点
-        :param depth: 当前的深度，用于确定标题级别
-        :return: Markdown格式的字符串
+        Args:
+            node: Node to convert
+            depth: Current depth (for nested heading levels)
+
+        Returns:
+            Markdown-formatted string
         """
-        # 根据节点的级别决定标题等级
+        # Determine heading level based on node level
         heading_level = min(6, node['level'] + depth) if node['level'] > 0 else 1 + depth
 
-        # 创建 Markdown 标题
+        # Create Markdown heading
         md = '#' * heading_level + ' ' + node['title'] + '\n\n'
 
-        # 添加节点内容（如果有）
+        # Add node content (if any)
         if node['content'].strip():
             md += node['content'].strip() + '\n\n'
 
-        # 递归添加子节点内容
+        # Recursively add child nodes
         for child in node['children']:
             md += self._node_to_markdown(child, depth + 1)
 
         return md
+
+    def get_strategy_name(self) -> str:
+        """
+        Get the name of the currently used parsing strategy.
+
+        Returns:
+            Strategy class name (e.g., "ThesisParsingStrategy")
+        """
+        if self.strategy:
+            return self.strategy.get_name()
+        return "None"
+
+
+# Register all available strategies
+StrategyFactory.register_strategy(ThesisParsingStrategy)
+StrategyFactory.register_strategy(ConferencePaperStrategy)
+StrategyFactory.register_strategy(JournalPaperStrategy)
