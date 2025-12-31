@@ -49,15 +49,16 @@ class ConferencePaperStrategy(ParsingStrategy):
                 "level": 1,
             },
             {
-                # Numbered or non-numbered Related Work
-                "keyword": r"(\d+\s+)?(Related Work|Background|Literature Review)",
-                "description": "related_work",
+                # Numbered or non-numbered Preliminaries (check before Related Work!)
+                # "Preliminaries and Background" should match as preliminaries
+                "keyword": r"(\d+\s+)?(Preliminaries|Preliminary|Notation)",
+                "description": "preliminaries",
                 "level": 1,
             },
             {
-                # Numbered or non-numbered Preliminaries
-                "keyword": r"(\d+\s+)?(Preliminaries|Preliminary|Notation)",
-                "description": "preliminaries",
+                # Numbered or non-numbered Related Work
+                "keyword": r"(\d+\s+)?(Related Work|Background|Literature Review)",
+                "description": "related_work",
                 "level": 1,
             },
             {
@@ -67,8 +68,9 @@ class ConferencePaperStrategy(ParsingStrategy):
                 "level": 1,
             },
             {
-                # Numbered or non-numbered Results/Experiments
-                "keyword": r"(\d+\s+)?(Results|Experiments|Experimental Results|Evaluation)",
+                # Numbered or non-numbered Results/Experiments/Evaluation
+                # Note: Check "Experimental Results?" before "Experiments?" to avoid partial matching
+                "keyword": r"(\d+\s+)?(Experimental Results?|Results?|Experiments?|Evaluations?)\s*$",
                 "description": "results",
                 "level": 1,
             },
@@ -104,8 +106,9 @@ class ConferencePaperStrategy(ParsingStrategy):
             },
             {
                 # Generic numbered main sections (fallback, should be last)
+                # These are major sections in numbered papers
                 "keyword": r"\d+\s+[A-Z]",
-                "description": "section",
+                "description": "numbered_section",
                 "level": 1,
             },
         ]
@@ -288,6 +291,9 @@ class ConferencePaperStrategy(ParsingStrategy):
             r"^Proof\.",  # Proofs
             r"^\$.*\$$",  # Math expressions
             r"^[\(\)\[\]\{\}]+$",  # Just brackets
+            # Code-like patterns (variable names, method calls, etc.)
+            r"^[a-z_]+\s+(the|a|an)\s+",  # "call the method", "get the result"
+            r"^(identical|compare|check|verify|validate)\s+",  # Action verbs for code steps
         ]
 
         for pattern in false_positive_patterns:
@@ -304,6 +310,26 @@ class ConferencePaperStrategy(ParsingStrategy):
             return False
 
         return True
+
+    def _is_major_section(self, description: str) -> bool:
+        """
+        Check if a section is a major/top-level section.
+
+        Major sections should not be nested under other sections.
+
+        Args:
+            description: The section description
+
+        Returns:
+            True if this is a major section
+        """
+        major_sections = {
+            'abstract', 'introduction', 'related_work', 'preliminaries',
+            'methodology', 'results', 'experiments', 'evaluation',
+            'discussion', 'conclusion', 'references', 'acknowledgment',
+            'appendix', 'numbered_section'  # Numbered sections (e.g., "3 Title") are major
+        }
+        return description in major_sections
 
     def parse(self, lines: List[str]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
         """
@@ -327,7 +353,29 @@ class ConferencePaperStrategy(ParsingStrategy):
 
         stage = 0  # 0: before title, 1: title found, 2: before abstract, 3: main content
 
+        # Context-aware nesting: track if we're inside a container section
+        in_container = False
+        # Container sections: sections that typically contain subsections
+        container_sections = {'related_work', 'preliminaries', 'methodology',
+                            'results', 'experiments', 'evaluation', 'discussion',
+                            'acknowledgment',  # Acknowledgments can contain funding, contributions
+                            'container_section'}  # Generic containers (Architectures, Models, etc.)
+
         def add_node(level, description, title, line_num):
+            nonlocal in_container
+
+            # Store original values for container state logic
+            original_level = level
+            original_description = description
+
+            # Context-aware nesting: auto-demote level 1 sections to level 2
+            # if we're inside a container and this is not a major section
+            if level == 1 and in_container and not self._is_major_section(description):
+                level = 2
+                # Update description to subsection if it was generic "section"
+                if description == "section":
+                    description = "subsection"
+
             node = {
                 "level": level,
                 "description": description,
@@ -336,6 +384,13 @@ class ConferencePaperStrategy(ParsingStrategy):
                 "content": "",
                 "children": []
             }
+
+            # Update container state (based on original values before any modifications)
+            if original_level == 1:
+                if original_description in container_sections:
+                    in_container = True
+                elif self._is_major_section(original_description):
+                    in_container = False
 
             # Pop nodes from stack until we find the parent
             while node_stack and node_stack[-1]["level"] >= level:
@@ -399,6 +454,17 @@ class ConferencePaperStrategy(ParsingStrategy):
                     if heading_level == 1:
                         # Try to categorize common sections
                         title = line.strip("# ").strip()
+
+                        # Check if this is a numbered section (e.g., "3 Title", "4 Title")
+                        # Numbered sections are major sections and should exit container mode
+                        is_numbered_section = bool(re.match(r'\d+\s+', title))
+
+                        # Check if this is a common container section (generic sections that contain subsections)
+                        # These are not standard academic sections but often contain subsections
+                        container_keywords = ["Architecture", "Model", "Approach", "Framework",
+                                            "System", "Dataset", "Baseline", "Setting"]
+                        is_container = any(keyword in title for keyword in container_keywords)
+
                         if any(keyword in title for keyword in
                               ["Preliminary", "Preliminaries", "Notation", "Problem"]):
                             add_node(1, "preliminaries", line, i)
@@ -407,9 +473,17 @@ class ConferencePaperStrategy(ParsingStrategy):
                             add_node(1, "limitations", line, i)
                         elif any(keyword in title for keyword in
                                 ["Communication", "Implementation", "Analysis"]):
-                            add_node(1, "section", line, i)
+                            desc = "section" if not is_numbered_section else "numbered_section"
+                            # Override: if it's a container keyword, use "container_section"
+                            if is_container and not is_numbered_section:
+                                desc = "container_section"
+                            add_node(1, desc, line, i)
                         else:
-                            add_node(1, "section", line, i)
+                            desc = "section" if not is_numbered_section else "numbered_section"
+                            # Override: if it's a container keyword, use "container_section"
+                            if is_container and not is_numbered_section:
+                                desc = "container_section"
+                            add_node(1, desc, line, i)
                     elif heading_level == 2:
                         add_node(2, "subsection", line, i)
                     elif heading_level == 3:
