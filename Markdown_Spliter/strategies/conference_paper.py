@@ -25,44 +25,62 @@ class ConferencePaperStrategy(ParsingStrategy):
         """Define keyword patterns for conference papers."""
         return [
             {
+                # Numbered subsections (e.g., "4.1 Title", "5.2 Title") - Check first!
+                "keyword": r"\d+\.\d+\s+",
+                "description": "subsection",
+                "level": 2,
+            },
+            {
+                # Numbered sub-subsections (e.g., "4.1.1 Title") - Check before subsections!
+                "keyword": r"\d+\.\d+\.\d+\s+",
+                "description": "subsubsection",
+                "level": 3,
+            },
+            {
                 # Abstract
                 "keyword": r"Abstract",
                 "description": "abstract",
                 "level": 1,
             },
             {
-                # Introduction
-                "keyword": r"Introduction",
+                # Numbered or non-numbered Introduction
+                "keyword": r"(\d+\s+)?Introduction",
                 "description": "introduction",
                 "level": 1,
             },
             {
-                # Related Work / Background
-                "keyword": r"(Related Work|Background|Literature Review)",
+                # Numbered or non-numbered Related Work
+                "keyword": r"(\d+\s+)?(Related Work|Background|Literature Review)",
                 "description": "related_work",
                 "level": 1,
             },
             {
-                # Method/Methodology/Approach
-                "keyword": r"(Method|Methodology|Approach|Proposed Method|Our Approach)",
+                # Numbered or non-numbered Preliminaries
+                "keyword": r"(\d+\s+)?(Preliminaries|Preliminary|Notation)",
+                "description": "preliminaries",
+                "level": 1,
+            },
+            {
+                # Numbered or non-numbered Method/Methodology
+                "keyword": r"(\d+\s+)?(Method|Methodology|Approach|Proposed Method|Our Approach)",
                 "description": "methodology",
                 "level": 1,
             },
             {
-                # Results/Experiments
-                "keyword": r"(Results|Experiments|Experimental Results|Evaluation)",
+                # Numbered or non-numbered Results/Experiments
+                "keyword": r"(\d+\s+)?(Results|Experiments|Experimental Results|Evaluation)",
                 "description": "results",
                 "level": 1,
             },
             {
-                # Discussion
-                "keyword": r"Discussion",
+                # Numbered or non-numbered Discussion
+                "keyword": r"(\d+\s+)?Discussion",
                 "description": "discussion",
                 "level": 1,
             },
             {
-                # Conclusion
-                "keyword": r"(Conclusion|Conclusions|Concluding Remarks)",
+                # Numbered or non-numbered Conclusion
+                "keyword": r"(\d+\s+)?(Conclusion|Conclusions|Concluding Remarks)",
                 "description": "conclusion",
                 "level": 1,
             },
@@ -82,6 +100,12 @@ class ConferencePaperStrategy(ParsingStrategy):
                 # Appendix
                 "keyword": r"(Appendix|Appendices)",
                 "description": "appendix",
+                "level": 1,
+            },
+            {
+                # Generic numbered main sections (fallback, should be last)
+                "keyword": r"\d+\s+[A-Z]",
+                "description": "section",
                 "level": 1,
             },
         ]
@@ -233,6 +257,54 @@ class ConferencePaperStrategy(ParsingStrategy):
         else:
             return 0.0  # Definitely uses Roman numerals
 
+    def _is_valid_heading(self, heading_text: str) -> bool:
+        """
+        Check if a heading is a valid section heading.
+
+        Filters out common false positives like:
+        - Algorithm descriptions
+        - Code snippets
+        - Mathematical expressions
+        - Single words without context
+
+        Args:
+            heading_text: The heading text (without # symbols)
+
+        Returns:
+            True if valid heading, False otherwise
+        """
+        heading_text = heading_text.strip()
+
+        # Filter out common false positives
+        false_positive_patterns = [
+            r"^(where|end|else|if|then|for|while|do|return):?\s*$",  # Code keywords alone
+            r"\b(while|for)\s+.*\s+(do|then)\b",  # Algorithm loops (while ... do, for ... do)
+            r"^(Input|Output|Require|Ensure):",  # Algorithm I/O specs
+            r"^Algorithm\s+\d+:",  # Algorithm descriptions
+            r"^Theorem\s+\d+:",  # Mathematical theorems
+            r"^Lemma\s+\d+:",  # Mathematical lemmas
+            r"^Proposition\s+\d+:",  # Mathematical propositions
+            r"^Definition\s+\d+:",  # Definitions
+            r"^Proof\.",  # Proofs
+            r"^\$.*\$$",  # Math expressions
+            r"^[\(\)\[\]\{\}]+$",  # Just brackets
+        ]
+
+        for pattern in false_positive_patterns:
+            if re.search(pattern, heading_text, re.IGNORECASE):
+                return False
+
+        # Must have at least some alphabetic characters
+        if not re.search(r"[A-Za-z]", heading_text):
+            return False
+
+        # Single words shorter than 3 chars are suspicious
+        words = heading_text.split()
+        if len(words) == 1 and len(words[0]) < 3:
+            return False
+
+        return True
+
     def parse(self, lines: List[str]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
         """
         Parse conference paper.
@@ -308,6 +380,14 @@ class ConferencePaperStrategy(ParsingStrategy):
 
             # Stage 2+: Main content
             if stage >= 1 and line.startswith("#"):
+                heading_text = line.strip("# ").strip()
+
+                # Filter out invalid headings
+                if not self._is_valid_heading(heading_text):
+                    add_content(line)
+                    i += 1
+                    continue
+
                 level, description = self._match_keyword_level(line)
 
                 if level is not None:
